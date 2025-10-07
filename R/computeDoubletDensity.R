@@ -1,15 +1,15 @@
 #' Compute the density of simulated doublets
-#' 
+#'
 #' Identify potential doublet cells based on the local density of simulated doublet expression profiles.
-#' This replaces the older \code{doubletCells} function from the \pkg{scran} package. 
-#' 
-#' @param x A numeric matrix-like object of count values, 
+#' This replaces the older \code{doubletCells} function from the \pkg{scran} package.
+#'
+#' @param x A numeric matrix-like object of count values,
 #' where each column corresponds to a cell and each row corresponds to an endogenous gene.
-#' 
+#'
 #' Alternatively, a \linkS4class{SummarizedExperiment} or \linkS4class{SingleCellExperiment} object containing such a matrix.
 #' @param size.factors.norm A numeric vector of size factors for normalization of \code{x} prior to PCA and distance calculations.
 #' If \code{NULL}, defaults to size factors derived from the library sizes of \code{x}.
-#' 
+#'
 #' For the SingleCellExperiment method, the default values are taken from \code{\link{sizeFactors}(x)}, if they are available.
 #' @param size.factors.content A numeric vector of size factors for RNA content normalization of \code{x} prior to simulating doublets.
 #' This is orthogonal to the values in \code{size.factors.norm}, see Details.
@@ -23,24 +23,24 @@
 #' @param BSPARAM A \linkS4class{BiocSingularParam} object specifying the algorithm to use for PCA, if \code{d} is not \code{NA}.
 #' @param BPPARAM A \linkS4class{BiocParallelParam} object specifying whether the neighbour searches should be parallelized.
 #' @param ... For the generic, additional arguments to pass to specific methods.
-#' 
+#'
 #' For the SummarizedExperiment and SingleCellExperiment methods, additional arguments to pass to the ANY method.
-#' @param assay.type A string specifying which assay values contain the count matrix. 
-#' 
-#' @return 
+#' @param assay.type A string specifying which assay values contain the count matrix.
+#'
+#' @return
 #' A numeric vector of doublet scores for each cell in \code{x}.
-#' 
+#'
 #' @details
 #' This function simulates doublets by adding the count vectors for two randomly chosen cells in \code{x}.
 #' For each original cell, we compute the density of neighboring simulated doublets and compare it to the density of neighboring original cells.
 #' Genuine doublets should have a high density of simulated doublets relative to the density of its neighbourhood.
 #' Thus, the doublet score for each cell is defined as the ratio of densities of simulated doublets to the density of the original cells.
-#' 
+#'
 #' Densities are calculated in low-dimensional space after a PCA on the log-normalized expression matrix of \code{x}.
 #' Simulated doublets are projected into the low-dimensional space using the rotation vectors computed from the original cells.
 #' For each cell, the density of simulated doublets is computed for a hypersphere with radius set to the median distance to the \code{k} nearest neighbour.
 #' This is normalized by \code{niters}, \code{k} and the total number of cells in \code{x} to yield the final score.
-#' 
+#'
 #' The two size factor arguments have different roles:
 #' \itemize{
 #' \item \code{size.factors.norm} contains the size factors to be used for normalization prior to PCA and distance calculations.
@@ -51,10 +51,10 @@
 #' It is possible to set both of these arguments as they are orthogonal to each other.
 #' Setting \code{size.factors.content} will not affect the calculation of log-normalized expression values from \code{x}.
 #' Conversely, setting \code{size.factors.norm} will not affect the ratio in which cells are added together when simulating doublets.
-#' 
+#'
 #' @author
 #' Aaron Lun
-#' 
+#'
 #' @examples
 #' # Mocking up an example.
 #' set.seed(100)
@@ -63,20 +63,20 @@
 #' mu2 <- 2^rnorm(ngenes)
 #' mu3 <- 2^rnorm(ngenes)
 #' mu4 <- 2^rnorm(ngenes)
-#' 
+#'
 #' counts.1 <- matrix(rpois(ngenes*100, mu1), nrow=ngenes) # Pure type 1
 #' counts.2 <- matrix(rpois(ngenes*100, mu2), nrow=ngenes) # Pure type 2
 #' counts.3 <- matrix(rpois(ngenes*100, mu3), nrow=ngenes) # Pure type 3
 #' counts.4 <- matrix(rpois(ngenes*100, mu4), nrow=ngenes) # Pure type 4
 #' counts.m <- matrix(rpois(ngenes*20, mu1+mu2), nrow=ngenes) # Doublets (1 & 2)
-#' 
+#'
 #' counts <- cbind(counts.1, counts.2, counts.3, counts.4, counts.m)
 #' clusters <- rep(1:5, c(rep(100, 4), ncol(counts.m)))
-#' 
+#'
 #' # Find potential doublets.
 #' scores <- computeDoubletDensity(counts)
 #' boxplot(split(log10(scores), clusters))
-#' 
+#'
 #' @references
 #' Lun ATL (2018).
 #' Detecting doublet cells with \emph{scran}.
@@ -102,88 +102,137 @@ NULL
 #' @importFrom BiocSingular runPCA bsparam
 #' @importFrom methods is
 #' @importFrom DelayedArray getAutoBPPARAM setAutoBPPARAM
-.doublet_cells <- function(x, size.factors.norm=NULL, size.factors.content=NULL,
-    k=50, subset.row=NULL, niters=max(10000, ncol(x)), block=10000, dims=25, 
-    BNPARAM=KmknnParam(), BSPARAM=bsparam(), BPPARAM=SerialParam())
-{
-    # Setting up the parallelization.
-    old <- getAutoBPPARAM()
-    setAutoBPPARAM(BPPARAM)
-    on.exit(setAutoBPPARAM(old))
+.doublet_cells <- function(
+  x,
+  size.factors.norm = NULL,
+  size.factors.content = NULL,
+  k = 50,
+  subset.row = NULL,
+  niters = max(10000, ncol(x)),
+  block = 10000,
+  dims = 25,
+  BNPARAM = KmknnParam(),
+  BSPARAM = bsparam(),
+  BPPARAM = SerialParam()
+) {
+  # Setting up the parallelization.
+  old <- getAutoBPPARAM()
+  setAutoBPPARAM(BPPARAM)
+  on.exit(setAutoBPPARAM(old))
 
-    if (.bpNotSharedOrUp(BPPARAM)){ 
-        bpstart(BPPARAM)
-        on.exit(bpstop(BPPARAM))
-    }
+  if (.bpNotSharedOrUp(BPPARAM)) {
+    bpstart(BPPARAM)
+    on.exit(bpstop(BPPARAM))
+  }
 
-    if (!is.null(subset.row)) {
-        x <- x[subset.row,,drop=FALSE]
-    }
-    if (is.null(size.factors.norm)) {
-        size.factors.norm <- librarySizeFactors(x, BPPARAM=BPPARAM)
-    }
-    if(!all(size.factors.norm>0))
-        stop("Some size.factors are not positive. This typically happens ",
-             "because some cells have no reads in the features specified by ",
-             "`subset.row` -- these should be filtered out.")
+  if (!is.null(subset.row)) {
+    x <- x[subset.row, , drop = FALSE]
+  }
+  if (is.null(size.factors.norm)) {
+    size.factors.norm <- librarySizeFactors(x, BPPARAM = BPPARAM)
+  }
+  if (!all(size.factors.norm > 0))
+    stop(
+      "Some size.factors are not positive. This typically happens ",
+      "because some cells have no reads in the features specified by ",
+      "`subset.row` -- these should be filtered out."
+    )
 
-    # Manually controlling the size factor centering here to ensure the final counts are on the same scale.
-    size.factors.norm <- size.factors.norm/mean(size.factors.norm)
-    if (!is.null(size.factors.content)) {
-        x <- normalizeCounts(x, size.factors.content, log=FALSE, center_size_factors=FALSE)
-        size.factors.norm <- size.factors.norm/size.factors.content
-    }
-    y <- normalizeCounts(x, size.factors.norm, center_size_factors=FALSE)
+  # Manually controlling the size factor centering here to ensure the final counts are on the same scale.
+  size.factors.norm <- size.factors.norm / mean(size.factors.norm)
+  if (!is.null(size.factors.content)) {
+    x <- normalizeCounts(
+      x,
+      size.factors.content,
+      log = FALSE,
+      center_size_factors = FALSE
+    )
+    size.factors.norm <- size.factors.norm / size.factors.content
+  }
+  y <- normalizeCounts(x, size.factors.norm, center_size_factors = FALSE)
 
-    # Running the PCA.
-    pc.out <- runPCA(t(y), center=TRUE, BSPARAM=BSPARAM, rank=dims, BPPARAM=BPPARAM)
-    pcs <- as.matrix(pc.out$x)
-    sim.pcs <- .spawn_doublet_pcs(x, size.factors.norm, V=pc.out$rotation, centers=rowMeans(y), niters=niters, block=block)
+  # Running the PCA.
+  pc.out <- runPCA(
+    t(y),
+    center = TRUE,
+    BSPARAM = BSPARAM,
+    rank = dims,
+    BPPARAM = BPPARAM
+  )
+  pcs <- as.matrix(pc.out$x)
+  sim.pcs <- .spawn_doublet_pcs(
+    x,
+    size.factors.norm,
+    V = pc.out$rotation,
+    centers = rowMeans(y),
+    niters = niters,
+    block = block
+  )
 
-    # Computing densities, using a distance computed from the kth nearest neighbor.
-    self.dist <- findDistance(pcs, k=k, BNPARAM=BNPARAM, BPPARAM=BPPARAM)
-    if(any(self.dist == 0))
-        stop("Duplicate cells detected. These are probably low-quality cells ",
-             "that have very few reads, and should be filtered out.")
+  # Computing densities, using a distance computed from the kth nearest neighbor.
+  self.dist <- findDistance(pcs, k = k, BNPARAM = BNPARAM, BPPARAM = BPPARAM)
+  if (any(self.dist == 0))
+    stop(
+      "Duplicate cells detected. These are probably low-quality cells ",
+      "that have very few reads, and should be filtered out."
+    )
 
-    sim.n <- queryNeighbors(as.matrix(sim.pcs), query=pcs,
-        threshold=self.dist * 1.00000001, # bump it up to avoid issues with numerical precision during tests.
-        BNPARAM=BNPARAM, BPPARAM=BPPARAM, 
-        get.distance=FALSE, get.index=FALSE)
+  sim.n <- queryNeighbors(
+    as.matrix(sim.pcs),
+    query = pcs,
+    threshold = self.dist * 1.00000001, # bump it up to avoid issues with numerical precision during tests.
+    BNPARAM = BNPARAM,
+    BPPARAM = BPPARAM,
+    get.distance = FALSE,
+    get.index = FALSE
+  )
 
-    sim.prop <- sim.n/niters
-    sim.prop/(k/ncol(x))
+  sim.prop <- sim.n / niters
+  sim.prop / (k / ncol(x))
 }
 
 #' @importFrom Matrix crossprod
 #' @importFrom scuttle normalizeCounts
 #' @importFrom DelayedArray sweep
-.spawn_doublet_pcs <- function(x, size.factors, V, centers, niters=10000L, block=10000L) {
-    collected <- list()
-    counter <- 1L
-    current <- 0L
-    mean.correction <- colSums(centers * V)
+.spawn_doublet_pcs <- function(
+  x,
+  size.factors,
+  V,
+  centers,
+  niters = 10000L,
+  block = 10000L
+) {
+  collected <- list()
+  counter <- 1L
+  current <- 0L
+  mean.correction <- colSums(centers * V)
 
-    while (current < niters) {
-        to.make <- min(block, niters - current)
-        left <- sample(ncol(x), to.make, replace=TRUE)
-        right <- sample(ncol(x), to.make, replace=TRUE)
-        sim.x <- x[,left,drop=FALSE] + x[,right,drop=FALSE]
+  while (current < niters) {
+    to.make <- min(block, niters - current)
+    left <- sample(ncol(x), to.make, replace = TRUE)
+    right <- sample(ncol(x), to.make, replace = TRUE)
+    sim.x <- x[, left, drop = FALSE] + x[, right, drop = FALSE]
 
-        # Do not center, otherwise the simulated doublets will always have higher normalized counts
-        # than actual doublets (as the latter will have been normalized to the level of singlets).
-        sim.sf <- size.factors[left] + size.factors[right]
-        sim.y <- normalizeCounts(sim.x, sim.sf, center_size_factors=FALSE)
+    # Do not center, otherwise the simulated doublets will always have higher normalized counts
+    # than actual doublets (as the latter will have been normalized to the level of singlets).
+    sim.sf <- size.factors[left] + size.factors[right]
+    sim.y <- normalizeCounts(sim.x, sim.sf, center_size_factors = FALSE)
 
-        # Projecting onto the PC space of the original data.
-        sim.pcs <- crossprod(sim.y, V)
-        sim.pcs <- sweep(sim.pcs, 2L, mean.correction, FUN="-", check.margin=FALSE)
-        collected[[counter]] <- sim.pcs
-        counter <- counter + 1L
-        current <- current + block
-    }
+    # Projecting onto the PC space of the original data.
+    sim.pcs <- crossprod(sim.y, V)
+    sim.pcs <- sweep(
+      sim.pcs,
+      2L,
+      mean.correction,
+      FUN = "-",
+      check.margin = FALSE
+    )
+    collected[[counter]] <- sim.pcs
+    counter <- counter + 1L
+    current <- current + block
+  }
 
-    do.call(rbind, collected)
+  do.call(rbind, collected)
 }
 
 ##############################
@@ -192,7 +241,10 @@ NULL
 
 #' @export
 #' @rdname computeDoubletDensity
-setGeneric("computeDoubletDensity", function(x, ...) standardGeneric("computeDoubletDensity"))
+setGeneric(
+  "computeDoubletDensity",
+  function(x, ...) standardGeneric("computeDoubletDensity")
+)
 
 #' @export
 #' @rdname computeDoubletDensity
@@ -201,15 +253,22 @@ setMethod("computeDoubletDensity", "ANY", .doublet_cells)
 #' @export
 #' @rdname computeDoubletDensity
 #' @importFrom SummarizedExperiment assay
-setMethod("computeDoubletDensity", "SummarizedExperiment", function(x, ..., assay.type="counts")
-{
-    .doublet_cells(assay(x, i=assay.type), ...)
-})
+setMethod(
+  "computeDoubletDensity",
+  "SummarizedExperiment",
+  function(x, ..., assay.type = "counts") {
+    .doublet_cells(assay(x, i = assay.type), ...)
+  }
+)
 
 #' @export
 #' @rdname computeDoubletDensity
 #' @importFrom SummarizedExperiment assay
 #' @importFrom BiocGenerics sizeFactors
-setMethod("computeDoubletDensity", "SingleCellExperiment", function(x, size.factors.norm=sizeFactors(x), ...) {
-    callNextMethod(x=x, size.factors.norm=size.factors.norm, ...)
-})
+setMethod(
+  "computeDoubletDensity",
+  "SingleCellExperiment",
+  function(x, size.factors.norm = sizeFactors(x), ...) {
+    callNextMethod(x = x, size.factors.norm = size.factors.norm, ...)
+  }
+)

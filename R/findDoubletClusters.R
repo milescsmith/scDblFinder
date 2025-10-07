@@ -112,89 +112,109 @@ NULL
 #' @importFrom stats p.adjust median
 #' @importFrom methods as
 #' @importClassesFrom S4Vectors SimpleList
-.doublet_cluster <- function(x, clusters, subset.row=NULL, threshold=0.05, get.all.pairs=FALSE, ...) {
-    if (length(unique(clusters)) < 3L) {
-        stop("need at least three clusters to detect doublet clusters")
+.doublet_cluster <- function(
+  x,
+  clusters,
+  subset.row = NULL,
+  threshold = 0.05,
+  get.all.pairs = FALSE,
+  ...
+) {
+  if (length(unique(clusters)) < 3L) {
+    stop("need at least three clusters to detect doublet clusters")
+  }
+
+  # Computing normalized counts using the library size (looking for compositional differences!)
+  sce <- SingleCellExperiment(list(counts = x))
+  sizeFactors(sce) <- librarySizeFactors(x, subset_row = subset.row)
+  sce <- logNormCounts(sce)
+
+  degs <- findMarkers(
+    sce,
+    clusters,
+    subset.row = subset.row,
+    full.stats = TRUE,
+    ...
+  )
+  med.lib.size <- vapply(
+    split(sizeFactors(sce), clusters),
+    FUN = median,
+    FUN.VALUE = 0
+  )
+  n.cluster <- table(clusters) / length(clusters)
+
+  # Setting up the output.
+  all.clusters <- names(degs)
+  collected.top <- collected.all <- vector("list", length(all.clusters))
+  names(collected.top) <- names(collected.all) <- all.clusters
+
+  # Running through all pairs of clusters and testing against the third cluster.
+  for (ref in all.clusters) {
+    ref.stats <- degs[[ref]]
+    remnants <- setdiff(all.clusters, ref)
+
+    num <- length(remnants) * (length(remnants) - 1L) / 2L
+    all.N <- med.N <- all.gene <- all.parent1 <- all.parent2 <- integer(num)
+    all.p <- numeric(num)
+    idx <- 1L
+
+    for (i1 in seq_along(remnants)) {
+      stats1 <- ref.stats[[paste0("stats.", remnants[i1])]]
+      for (i2 in seq_len(i1 - 1L)) {
+        stats2 <- ref.stats[[paste0("stats.", remnants[i2])]]
+
+        # Obtaining the IUT and setting opposing log-fold changes to 1.
+        max.log.p <- pmax(stats1$log.p.value, stats2$log.p.value)
+        max.log.p[sign(stats1$logFC) != sign(stats2$logFC)] <- 0
+
+        # Correcting across genes. We use [1] to get NA when there are
+        # no genes, which avoids an nrow() mismatch in DataFrame().
+        log.adj.p <- .logBH(max.log.p)
+        best.gene <- which.min(max.log.p)[1]
+
+        all.N[idx] <- sum(log.adj.p <= log(threshold), na.rm = TRUE)
+        all.gene[idx] <- best.gene
+        all.p[idx] <- exp(log.adj.p[best.gene])
+        all.parent1[idx] <- i1
+        all.parent2[idx] <- i2
+        idx <- idx + 1L
+      }
     }
 
-    # Computing normalized counts using the library size (looking for compositional differences!)
-    sce <- SingleCellExperiment(list(counts=x))
-    sizeFactors(sce) <- librarySizeFactors(x, subset_row=subset.row)
-    sce <- logNormCounts(sce)
+    # Formatting the output.
+    parent1 <- remnants[all.parent1]
+    parent2 <- remnants[all.parent2]
 
-    degs <- findMarkers(sce, clusters, subset.row=subset.row, full.stats=TRUE, ...)
-    med.lib.size <- vapply(split(sizeFactors(sce), clusters), FUN=median, FUN.VALUE=0)
-    n.cluster <- table(clusters)/length(clusters)
+    stats <- DataFrame(
+      source1 = parent1,
+      source2 = parent2,
+      num.de = all.N,
+      median.de = rep(0, length(all.N)), # placeholder, see below.
+      best = rownames(ref.stats)[all.gene],
+      p.value = all.p,
+      lib.size1 = unname(med.lib.size[parent1] / med.lib.size[ref]),
+      lib.size2 = unname(med.lib.size[parent2] / med.lib.size[ref])
+    )
 
-    # Setting up the output.
-    all.clusters <- names(degs)
-    collected.top <- collected.all <- vector("list", length(all.clusters))
-    names(collected.top) <- names(collected.all) <- all.clusters
+    o <- order(all.N, -all.p)
+    top <- cbind(stats[o[1], ], prop = n.cluster[[ref]])
+    med.de <- median(all.N)
+    top$median.de <- med.de
+    rownames(top) <- ref
+    collected.top[[ref]] <- top
 
-    # Running through all pairs of clusters and testing against the third cluster.
-    for (ref in all.clusters) {
-        ref.stats <- degs[[ref]]
-        remnants <- setdiff(all.clusters, ref)
-
-        num <- length(remnants) * (length(remnants) - 1L)/2L
-        all.N <- med.N <- all.gene <- all.parent1 <- all.parent2 <- integer(num)
-        all.p <- numeric(num)
-        idx <- 1L
-
-        for (i1 in seq_along(remnants)) {
-            stats1 <- ref.stats[[paste0("stats.", remnants[i1])]]
-            for (i2 in seq_len(i1-1L)) {
-                stats2 <- ref.stats[[paste0("stats.", remnants[i2])]]
-
-                # Obtaining the IUT and setting opposing log-fold changes to 1.
-                max.log.p <- pmax(stats1$log.p.value, stats2$log.p.value)
-                max.log.p[sign(stats1$logFC) != sign(stats2$logFC)] <- 0
-
-                # Correcting across genes. We use [1] to get NA when there are
-                # no genes, which avoids an nrow() mismatch in DataFrame().
-                log.adj.p <- .logBH(max.log.p)
-                best.gene <- which.min(max.log.p)[1]
-
-                all.N[idx] <- sum(log.adj.p <= log(threshold), na.rm=TRUE)
-                all.gene[idx] <- best.gene
-                all.p[idx] <- exp(log.adj.p[best.gene])
-                all.parent1[idx] <- i1
-                all.parent2[idx] <- i2
-                idx <- idx + 1L
-            }
-        }
-
-        # Formatting the output.
-        parent1 <- remnants[all.parent1]
-        parent2 <- remnants[all.parent2]
-
-        stats <- DataFrame(source1=parent1, source2=parent2,
-            num.de=all.N,
-            median.de=rep(0, length(all.N)), # placeholder, see below.
-            best=rownames(ref.stats)[all.gene],
-            p.value=all.p,
-            lib.size1=unname(med.lib.size[parent1]/med.lib.size[ref]),
-            lib.size2=unname(med.lib.size[parent2]/med.lib.size[ref]))
-
-        o <- order(all.N, -all.p)
-        top <- cbind(stats[o[1],], prop=n.cluster[[ref]])
-        med.de <- median(all.N)
-        top$median.de <- med.de
-        rownames(top) <- ref
-        collected.top[[ref]] <- top
-
-        if (get.all.pairs) {
-            stats$median.de <- NULL
-            collected.all[[ref]] <- stats[o,]
-        }
-    }
-
-    # Returning the DataFrame of compiled results.
-    out <- do.call(rbind, collected.top)
     if (get.all.pairs) {
-        out$all.pairs <- as(collected.all, "SimpleList")
+      stats$median.de <- NULL
+      collected.all[[ref]] <- stats[o, ]
     }
-    out[order(out$num.de),]
+  }
+
+  # Returning the DataFrame of compiled results.
+  out <- do.call(rbind, collected.top)
+  if (get.all.pairs) {
+    out$all.pairs <- as(collected.all, "SimpleList")
+  }
+  out[order(out$num.de), ]
 }
 
 ##############################
@@ -203,7 +223,10 @@ NULL
 
 #' @export
 #' @rdname findDoubletClusters
-setGeneric("findDoubletClusters", function(x, ...) standardGeneric("findDoubletClusters"))
+setGeneric(
+  "findDoubletClusters",
+  function(x, ...) standardGeneric("findDoubletClusters")
+)
 
 #' @export
 #' @rdname findDoubletClusters
@@ -212,13 +235,21 @@ setMethod("findDoubletClusters", "ANY", .doublet_cluster)
 #' @export
 #' @rdname findDoubletClusters
 #' @importFrom SummarizedExperiment assay
-setMethod("findDoubletClusters", "SummarizedExperiment", function(x, ..., assay.type="counts") {
-    .doublet_cluster(assay(x, i=assay.type), ...)
-})
+setMethod(
+  "findDoubletClusters",
+  "SummarizedExperiment",
+  function(x, ..., assay.type = "counts") {
+    .doublet_cluster(assay(x, i = assay.type), ...)
+  }
+)
 
 #' @export
 #' @rdname findDoubletClusters
 #' @importFrom SingleCellExperiment colLabels
-setMethod("findDoubletClusters", "SingleCellExperiment", function(x, clusters=colLabels(x, onAbsence="error"), ...) {
-    callNextMethod(x=x, clusters=clusters, ...)
-})
+setMethod(
+  "findDoubletClusters",
+  "SingleCellExperiment",
+  function(x, clusters = colLabels(x, onAbsence = "error"), ...) {
+    callNextMethod(x = x, clusters = clusters, ...)
+  }
+)
