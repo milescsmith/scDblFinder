@@ -709,7 +709,6 @@ scDblFinder <- function(
   if (hasOrigins) {
     knn$orig <- matrix(origins[knn$index], nrow = nrow(knn[[1]]))
   }
-  browser()
   if (any(w <- knn$distance == 0)) {
     knn$distance[w] <- min(knn$distance[knn$distance[, 1] > 0, 1])
   }
